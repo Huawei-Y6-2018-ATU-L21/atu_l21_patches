@@ -1,0 +1,426 @@
+diff --git a/fs_mgr/fs_mgr.cpp b/fs_mgr/fs_mgr.cpp
+index 8896ec3..905f3c5 100644
+--- a/fs_mgr/fs_mgr.cpp
++++ b/fs_mgr/fs_mgr.cpp
+@@ -1388,6 +1388,13 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
+         // ignore it here. With one exception, if the filesystem is
+         // formattable, then it can only be formatted in the second stage,
+         // so we allow it to mount here.
++        // ATU-L21: the Android 8.0 vendor fstab does not mark vendor/odm, mounted in first stage,
++        // with first_stage_mount; mounting again fails mount_all with "busy"
++        // (ro.crypto.state is not set -> zygote does not start). Skip if already mounted.
++        if (current_entry.mount_point != "/data" && IsMountPointMounted(current_entry.mount_point)) {
++            LINFO << "ATU: " << current_entry.mount_point << " already mounted, skipping";
++            continue;
++        }
+         if (current_entry.fs_mgr_flags.first_stage_mount &&
+             (!current_entry.fs_mgr_flags.formattable ||
+              IsMountPointMounted(current_entry.mount_point))) {
+@@ -1628,7 +1635,9 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
+                         "on %s at %s options: %s",
+                         attempted_entry.blk_device.c_str(), attempted_entry.mount_point.c_str(),
+                         attempted_entry.fs_options.c_str());
+-                ++error_count;
++                // ATU-L21: the Android 8.0 Huawei fstab has optional entries with the "continue" flag
++                // partitions (e.g. an empty /patch_hw); errors outside /data are not fatal.
++                if (attempted_entry.mount_point == "/data") ++error_count;
+             }
+             continue;
+         }
+diff --git a/fs_mgr/fs_mgr_fstab.cpp b/fs_mgr/fs_mgr_fstab.cpp
+index f5ab557..1de9602 100644
+--- a/fs_mgr/fs_mgr_fstab.cpp
++++ b/fs_mgr/fs_mgr_fstab.cpp
+@@ -103,6 +103,12 @@ bool ReadDtFile(const std::string& file_name, std::string* dt_value) {
+ }
+ 
+ void ParseFileEncryption(const std::string& arg, FstabEntry* entry) {
++    // ATU-L21: with the Android 8.0 Qualcomm vendor + 3.18 kernel, FBE (keymaster 3.0) may hang
++    // at boot. If the marker file exists in system, fileencryption is ignored.
++    if (access("/system/etc/atu_disable_fbe", F_OK) == 0) {
++        LINFO << "ATU: ignored fileencryption=" << arg << " (atu_disable_fbe)";
++        return;
++    }
+     entry->fs_mgr_flags.file_encryption = true;
+     entry->encryption_options = arg;
+ }
+@@ -710,6 +716,16 @@ bool ReadFstabFromFile(const std::string& path, Fstab* fstab_out) {
+         LERROR << __FUNCTION__ << "(): failed to load fstab from : '" << path << "'";
+         return false;
+     }
++    if (!is_proc_mounts && access("/system/etc/atu_disable_verity", F_OK) == 0) {
++        // ATU-L21: on Huawei partitions that TWRP mounted rw (odm/product/cust...)
++        // the old dm-verity hashes no longer match -> endless "hash fail". Verify is disabled on unlocked devices.
++        for (auto& entry : fstab) {
++            if (entry.fs_mgr_flags.verify) {
++                LINFO << "ATU: ignored verify for " << entry.mount_point;
++                entry.fs_mgr_flags.verify = false;
++            }
++        }
++    }
+     if (!is_proc_mounts) {
+         if (!access(android::gsi::kGsiBootedIndicatorFile, F_OK)) {
+             // This is expected to fail if host is android Q, since Q doesn't
+diff --git a/healthd/Android.bp b/healthd/Android.bp
+index ec47f68..a8ef364 100644
+--- a/healthd/Android.bp
++++ b/healthd/Android.bp
+@@ -265,3 +265,15 @@ phony {
+         "system_core_charger_res_images_battery_scale.png",
+     ],
+ }
++
++// ATU-L21: the 8.0 vendor only provides health@1.0; system_server requires IHealth 2.x.
++// The default 2.0 service is installed under /system/bin/hw (atu-shim.rc + atu-health.xml).
++cc_binary {
++    name: "atu_health_2_0_service",
++    stem: "android.hardware.health@2.0-service",
++    defaults: ["android.hardware.health@2.0-service_defaults"],
++    relative_install_path: "hw",
++    srcs: [
++        "HealthServiceDefault.cpp",
++    ],
++}
+diff --git a/init/init.cpp b/init/init.cpp
+index 942feb9..036f556 100644
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -750,6 +750,7 @@ int SecondStageMain(int argc, char** argv) {
+ 
+     SetStdioToDevNull(argv);
+     InitKernelLogging(argv);
++    // StartAtuDebugWatcher();  // ATU: caused a SIGCHLD signalfd race (init hung waiting for exec)
+     LOG(INFO) << "init second stage started!";
+ 
+     // Update $PATH in the case the second stage init is newer than first stage init, where it is
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index 4950042..ed9bf43 100644
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -1093,6 +1093,21 @@ void PropertyLoadBootDefaults() {
+         load_properties_from_file(kDebugRamdiskProp, nullptr, &properties);
+     }
+ 
++    // ATU-L21: the Android 8.0 vendor build.prop defines ro.build.* (sdk=26, release=8.0.0 ...) and
++    // is loaded later and overrides the system values (derive_classpath "IsAtLeastS" abort).
++    // restore the /system/build.prop values for ro.build.*.
++    {
++        std::map<std::string, std::string> sys_props;
++        load_properties_from_file("/system/build.prop", nullptr, &sys_props);
++        for (const auto& [name, value] : sys_props) {
++            if (StartsWith(name, "ro.build.") && properties[name] != value) {
++                LOG(INFO) << "ATU: " << name << " restored to the system value (" << properties[name]
++                          << " -> " << value << ")";
++                properties[name] = value;
++            }
++        }
++    }
++
+     for (const auto& [name, value] : properties) {
+         std::string error;
+         if (PropertySet(name, value, &error) != PROP_SUCCESS) {
+diff --git a/init/reboot_utils.cpp b/init/reboot_utils.cpp
+index b3fa9fd..20b08f4 100644
+--- a/init/reboot_utils.cpp
++++ b/init/reboot_utils.cpp
+@@ -14,6 +14,13 @@
+  * limitations under the License.
+  */
+ 
++#include <dirent.h>
++#include <algorithm>
++#include <thread>
++#include <sys/klog.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
+ #include <sys/capability.h>
+ #include <sys/reboot.h>
+ #include <sys/syscall.h>
+@@ -36,7 +43,9 @@
+ namespace android {
+ namespace init {
+ 
+-static std::string init_fatal_reboot_target = "bootloader";
++// ATU-L21 debug: the Huawei bootloader ignores the ramdisk cmdline, so the default
++// target is recovery (TWRP), so the log can be read from cache after a crash.
++static std::string init_fatal_reboot_target = "recovery";
+ static bool init_fatal_panic = false;
+ 
+ // this needs to read the /proc/* files directly because it is called before
+@@ -141,6 +150,99 @@ void __attribute__((noreturn)) RebootSystem(unsigned int cmd, const std::string&
+     abort();
+ }
+ 
++// ATU-L21 debug: there is no pstore/last_kmsg, so when init hits a fatal error the kernel
++// log to persistent storage. Order: already mounted /cache, /data, and as a last resort
++// mounting the cache partition (mmcblk0p45) ourselves (only works before SELinux is loaded).
++static bool WriteKmsgTo(const std::string& dir, const std::string& buf,
++                        const char* prefix = "kmsg", bool quiet = false) {
++    mkdir(dir.c_str(), 0755);
++    std::string boot_id;
++    android::base::ReadFileToString("/proc/sys/kernel/random/boot_id", &boot_id);
++    boot_id = android::base::Trim(boot_id);
++    if (boot_id.empty()) boot_id = "unknown";
++    std::string out = dir + "/" + prefix + "-" + boot_id + ".txt";
++    if (!android::base::WriteStringToFile(buf, out)) return false;
++    sync();
++    if (!quiet) LOG(ERROR) << "ATU: kmsg written: " << out;
++    return true;
++}
++
++// ATU-L21 debug: so that a trace remains even if boot hangs (without a fatal), every 20 s
++// writes kmsg and the process list (/proc/<pid>/cmdline, state, wchan) to the mounted /cache.
++static std::string ProcSnapshot() {
++    std::string out;
++    std::unique_ptr<DIR, decltype(&closedir)> d(opendir("/proc"), closedir);
++    if (!d) return out;
++    dirent* e;
++    while ((e = readdir(d.get()))) {
++        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
++        std::string base = std::string("/proc/") + e->d_name;
++        std::string cmd, stat, wchan, ctx;
++        android::base::ReadFileToString(base + "/cmdline", &cmd);
++        std::replace(cmd.begin(), cmd.end(), '\0', ' ');
++        android::base::ReadFileToString(base + "/stat", &stat);
++        android::base::ReadFileToString(base + "/wchan", &wchan);
++        android::base::ReadFileToString(base + "/attr/current", &ctx);
++        ctx = android::base::Trim(ctx);
++        // stat: "pid (comm) S ..." -> first 3 fields only
++        auto p = stat.find(')');
++        std::string head = p == std::string::npos ? stat : stat.substr(0, std::min(stat.size(), p + 3));
++        out += head + " | " + wchan + " | " + ctx + " | " + cmd + "\n";
++    }
++    return out;
++}
++
++void StartAtuDebugWatcher() {
++    std::thread([] {
++        for (int i = 0; i < 300; i++) {
++            sleep(i < 20 ? 3 : 20);  // every 3 s for the first ~1 min, then every 20 s
++            if (access("/cache/lost+found", F_OK) != 0) {
++                // /cache is not mounted yet: mount it ourselves with init's normal permissions.
++                const char* dev = "/dev/block/bootdevice/by-name/cache";
++                if (access(dev, F_OK) != 0) dev = "/dev/block/by-name/cache";
++                if (mount(dev, "/cache", "ext4", MS_NOATIME | MS_NODEV | MS_NOSUID, "") != 0) {
++                    continue;
++                }
++                LOG(ERROR) << "ATU: watcher /cache'i kendisi mount etti";
++            }
++            int size = klogctl(10, nullptr, 0);
++            if (size <= 0) size = 1 << 20;
++            std::string buf(size, '\0');
++            int n = klogctl(3, buf.data(), size);
++            if (n > 0) {
++                buf.resize(n);
++                WriteKmsgTo("/cache/init-fatal", buf, "watch-kmsg", true);
++            }
++            WriteKmsgTo("/cache/init-fatal", ProcSnapshot(), "watch-ps", true);
++        }
++    }).detach();
++}
++
++static void DumpKmsgToCache() {
++    int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, nullptr, 0);
++    if (size <= 0) size = 1 << 20;
++    std::string buf(size, '\0');
++    int n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf.data(), size);
++    if (n <= 0) return;
++    buf.resize(n);
++
++    if (access("/cache/lost+found", F_OK) == 0 && WriteKmsgTo("/cache/init-fatal", buf)) return;
++    if (access("/data/unencrypted", F_OK) == 0 && WriteKmsgTo("/data/init-fatal", buf)) return;
++
++    std::string devnum;
++    if (!android::base::ReadFileToString("/sys/class/block/mmcblk0p45/dev", &devnum)) return;
++    unsigned int maj = 0, min = 0;
++    if (sscanf(devnum.c_str(), "%u:%u", &maj, &min) != 2) return;
++    const char* blk = "/dev/__atu_cache_blk";
++    const char* mnt = "/dev/__atu_cache";
++    unlink(blk);
++    if (mknod(blk, S_IFBLK | 0600, makedev(maj, min)) != 0) return;
++    mkdir(mnt, 0700);
++    if (mount(blk, mnt, "ext4", MS_NOATIME | MS_NODEV | MS_NOSUID, "") != 0) return;
++    WriteKmsgTo(std::string(mnt) + "/init-fatal", buf);
++    umount(mnt);
++}
++
+ void __attribute__((noreturn)) InitFatalReboot(int signal_number) {
+     auto pid = fork();
+ 
+@@ -151,7 +253,7 @@ void __attribute__((noreturn)) InitFatalReboot(int signal_number) {
+         // Fork a child for safety, since we always want to shut down if something goes wrong, but
+         // its worth trying to get the backtrace, even in the signal handler, since typically it
+         // does work despite not being async-signal-safe.
+-        sleep(5);
++        sleep(185);
+         RebootSystem(ANDROID_RB_RESTART2, init_fatal_reboot_target);
+     }
+ 
+@@ -165,6 +267,10 @@ void __attribute__((noreturn)) InitFatalReboot(int signal_number) {
+     for (size_t i = 0; i < backtrace->NumFrames(); i++) {
+         LOG(ERROR) << backtrace->FormatFrameData(i);
+     }
++    DumpKmsgToCache();
++    LOG(ERROR) << "ATU: waiting 180 s (logs can be pulled via adb)";
++    sleep(180);
++    DumpKmsgToCache();
+     if (init_fatal_panic) {
+         LOG(ERROR) << __FUNCTION__ << ": Trigger crash";
+         android::base::WriteStringToFile("c", PROC_SYSRQ);
+diff --git a/init/reboot_utils.h b/init/reboot_utils.h
+index a0023b9..29ea48b 100644
+--- a/init/reboot_utils.h
++++ b/init/reboot_utils.h
+@@ -32,6 +32,7 @@ bool IsRebootCapable();
+ void __attribute__((noreturn)) RebootSystem(unsigned int cmd, const std::string& reboot_target);
+ void __attribute__((noreturn)) InitFatalReboot(int signal_number);
+ void InstallRebootSignalHandlers();
++void StartAtuDebugWatcher();  // ATU-L21 debug
+ 
+ }  // namespace init
+ }  // namespace android
+diff --git a/init/service.cpp b/init/service.cpp
+index c3069f5..947a6b7 100644
+--- a/init/service.cpp
++++ b/init/service.cpp
+@@ -395,6 +395,13 @@ Result<void> Service::ExecStart() {
+ }
+ 
+ Result<void> Service::Start() {
++    // ATU-L21 debug: stdout/stderr of vendor/odm binaries go to kmsg (so CANNOT LINK etc.
++    // are visible). Not applied to system processes such as zygote (fd allowlist check).
++    if (proc_attr_.console.empty() &&
++        (android::base::StartsWith(args_[0], "/vendor/") ||
++         android::base::StartsWith(args_[0], "/odm/"))) {
++        proc_attr_.stdio_to_kmsg = true;
++    }
+     auto reboot_on_failure = make_scope_guard([this] {
+         if (on_failure_reboot_target_) {
+             trigger_shutdown(*on_failure_reboot_target_);
+diff --git a/init/subcontext.cpp b/init/subcontext.cpp
+index fa48bea..ab72471 100644
+--- a/init/subcontext.cpp
++++ b/init/subcontext.cpp
+@@ -365,6 +365,8 @@ bool SubcontextChildReap(pid_t pid) {
+ 
+ void SubcontextTerminate() {
+     subcontext_terminated_by_shutdown = true;
++    // ATU-L21: on a pre-P (8.0) vendor no subcontext is created; a null deref crashes init on shutdown.
++    if (!subcontext) return;
+     kill(subcontext->pid(), SIGTERM);
+ }
+ 
+diff --git a/init/ueventd.cpp b/init/ueventd.cpp
+index 331255b..808ca34 100644
+--- a/init/ueventd.cpp
++++ b/init/ueventd.cpp
+@@ -269,7 +269,10 @@ void ColdBoot::Run() {
+ 
+ static UeventdConfiguration GetConfiguration() {
+     // TODO: Remove these legacy paths once Android S is no longer supported.
+-    if (android::base::GetIntProperty("ro.product.first_api_level", 10000) <= __ANDROID_API_S__) {
++    // ATU-L21: the Android 8.0 vendor does not set ro.product.first_api_level (defaults to 10000) and
++    // keeps device permissions in the old /vendor/ueventd.rc path. Read the legacy paths if it exists.
++    if (android::base::GetIntProperty("ro.product.first_api_level", 10000) <= __ANDROID_API_S__ ||
++        access("/vendor/ueventd.rc", F_OK) == 0) {
+         auto hardware = android::base::GetProperty("ro.hardware", "");
+         return ParseConfig({"/system/etc/ueventd.rc", "/vendor/ueventd.rc", "/odm/ueventd.rc",
+                             "/ueventd." + hardware + ".rc"});
+diff --git a/libcutils/Android.bp b/libcutils/Android.bp
+index 68b21c6..a8d7a29 100644
+--- a/libcutils/Android.bp
++++ b/libcutils/Android.bp
+@@ -164,6 +164,7 @@ cc_library {
+         "record_stream.cpp",
+         "strlcpy.c",
+         "threads.cpp",
++        "atu_thread_store_compat.cpp", // ATU-L21
+     ],
+ 
+     target: {
+diff --git a/libprocessgroup/setup/cgroup_map_write.cpp b/libprocessgroup/setup/cgroup_map_write.cpp
+index 3121d24..80876bf 100644
+--- a/libprocessgroup/setup/cgroup_map_write.cpp
++++ b/libprocessgroup/setup/cgroup_map_write.cpp
+@@ -265,6 +265,14 @@ static bool SetupCgroup(const CgroupDescriptor& descriptor) {
+ 
+             result = mount("none", controller->path(), "cgroup2", MS_NODEV | MS_NOEXEC | MS_NOSUID,
+                            nullptr);
++            if (result < 0) {
++                // ATU-L21: no cgroup2 on the 3.18 kernel. For UID/PID process groups mount
++                // a cgroup v1 cpuacct hierarchy is mounted at the same point (like /acct before Android 10);
++                // so init can stop services (kill process group).
++                PLOG(WARNING) << "ATU: cgroup2 mount edilemedi, cpuacct (v1) deneniyor";
++                result = mount("none", controller->path(), "cgroup",
++                               MS_NODEV | MS_NOEXEC | MS_NOSUID, "cpuacct");
++            }
+ 
+             // selinux permissions change after mounting, so it's ok to change mode and owner now
+             if (!ChangeDirModeAndOwner(controller->path(), descriptor.mode(), descriptor.uid(),
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 8a38559..2ee6c68 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -4,6 +4,8 @@
+ # This is a common source of Android security bugs.
+ #
+ 
++# ATU-L21: read the service overrides before the vendor imports.
++import /system/etc/init/hw/atu-overrides.rc
+ import /init.environ.rc
+ import /system/etc/init/hw/init.usb.rc
+ import /init.${ro.hardware}.rc
+diff --git a/rootdir/ueventd.rc b/rootdir/ueventd.rc
+index 67230e0..b4d7726 100644
+--- a/rootdir/ueventd.rc
++++ b/rootdir/ueventd.rc
+@@ -2,6 +2,9 @@ import /vendor/etc/ueventd.rc
+ import /odm/etc/ueventd.rc
+ 
+ firmware_directories /etc/firmware/ /odm/firmware/ /vendor/firmware/ /firmware/image/
++# ATU-L21: Huawei 8.0 devices keep firmware (e.g. TFA9872 speaker amp tfa98xx.cnt) in /odm/etc/firmware;
++# if it is not found the amplifier accepts no sample rate and there is no sound at all.
++firmware_directories /odm/etc/firmware/
+ uevent_socket_rcvbuf_size 16M
+ 
+ subsystem graphics
+diff --git a/libcutils/atu_thread_store_compat.cpp b/libcutils/atu_thread_store_compat.cpp
+new file mode 100644
+index 0000000..d6c8380
+--- /dev/null
++++ b/libcutils/atu_thread_store_compat.cpp
+@@ -0,0 +1,33 @@
++// ATU-L21: cutils thread_store API removed in Android 11. Needed by Android 8.0 vendor processes
++// the Android 9 libbinder.so used there (Parcel memory layout compat) needs these functions.
++#include <pthread.h>
++#include <stddef.h>
++
++extern "C" {
++typedef struct {
++    pthread_mutex_t lock;
++    int has_tls;
++    pthread_key_t tls;
++} thread_store_t;
++
++typedef void (*thread_store_destruct_t)(void* value);
++
++__attribute__((visibility("default"))) void* thread_store_get(thread_store_t* store) {
++    if (!store->has_tls) return nullptr;
++    return pthread_getspecific(store->tls);
++}
++
++__attribute__((visibility("default"))) void thread_store_set(thread_store_t* store, void* value,
++                                                             thread_store_destruct_t destroy) {
++    pthread_mutex_lock(&store->lock);
++    if (!store->has_tls) {
++        if (pthread_key_create(&store->tls, destroy) != 0) {
++            pthread_mutex_unlock(&store->lock);
++            return;
++        }
++        store->has_tls = 1;
++    }
++    pthread_mutex_unlock(&store->lock);
++    pthread_setspecific(store->tls, value);
++}
++}

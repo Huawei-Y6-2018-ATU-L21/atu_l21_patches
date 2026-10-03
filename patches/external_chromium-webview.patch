@@ -1,0 +1,16 @@
+diff --git a/Android.bp b/Android.bp
+index 2114d08..dadd053 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -34,6 +34,11 @@ android_app_import {
+     name: "webview",
+     product_specific: true,
+     default_dev_cert: true,
++    // ATU-L21: match the Chromium 154 manifest (manifest_check).
++    optional_uses_libs: [
++        "android.test.base",
++        "androidx.window.extensions",
++    ],
+     required: [
+         "libwebviewchromium_loader",
+         "libwebviewchromium_plat_support",

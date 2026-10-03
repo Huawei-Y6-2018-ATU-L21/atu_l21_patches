@@ -1,0 +1,20 @@
+diff --git a/Android.bp b/Android.bp
+index 33ba0e9..047a736 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -134,6 +134,15 @@ cc_library {
+     name: "libhidltransport",
+     vendor_available: true,
+ 
++    // ATU-L21: every 8.0 vendor HIDL user links this empty library; the shim carrying old toString/descriptor
++    // symbols is thus loaded into each of them (system variant only).
++    target: {
++        vendor: {
++            exclude_shared_libs: ["libatu_shim"],
++        },
++    },
++    shared_libs: ["libatu_shim"],
++
+     visibility: [
+         ":__subpackages__",
+         "//hardware:__subpackages__",

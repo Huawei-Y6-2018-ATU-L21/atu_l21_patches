@@ -1,0 +1,14 @@
+diff --git a/app/src/main/Android.bp b/app/src/main/Android.bp
+index 879e48d..b3e8641 100644
+--- a/app/src/main/Android.bp
++++ b/app/src/main/Android.bp
+@@ -23,6 +23,9 @@ android_app {
+ 
+     product_specific: true,
+ 
++    // ATU-L21: replaces AOSP Browser2.
++    overrides: ["Browser2"],
++
+     static_libs: [
+         "androidx.annotation_annotation",
+         "androidx.appcompat_appcompat",

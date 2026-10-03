@@ -1,0 +1,14 @@
+diff --git a/linker/linker_config.cpp b/linker/linker_config.cpp
+index 1771e87..3faec39 100644
+--- a/linker/linker_config.cpp
++++ b/linker/linker_config.cpp
+@@ -262,7 +262,8 @@ static bool parse_config_file(const char* ld_config_file_path,
+         resolved_path = value;
+       }
+ 
+-      if (file_is_under_dir(binary_realpath, resolved_path)) {
++      // ATU-L21: dir.<section> may also be a full file path (a section for a single program).
++      if (binary_realpath == resolved_path || file_is_under_dir(binary_realpath, resolved_path)) {
+         section_name = name.substr(4);
+         break;
+       }

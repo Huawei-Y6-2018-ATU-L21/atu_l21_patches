@@ -1,0 +1,33 @@
+diff --git a/core/java/android/os/Build.java b/core/java/android/os/Build.java
+index b7dd36e2..a9028d88 100755
+--- a/core/java/android/os/Build.java
++++ b/core/java/android/os/Build.java
+@@ -1233,7 +1233,10 @@ public class Build {
+                         + String.valueOf(result));
+             }
+ 
+-            return result == 0;
++            // ATU-L21: Android 8.0 vendor + 3.18 kernel; the Android 12 FCM has no kernel entry for 3.18
++            // ("No kernel entry found for kernel version 3.18") -> verification always fails and every
++            // boot showed "There's an internal problem with your device". Only logged now.
++            return true;
+         }
+ 
+         final String system = SystemProperties.get("ro.system.build.fingerprint");
+diff --git a/services/core/java/com/android/server/pm/PackageManagerService.java b/services/core/java/com/android/server/pm/PackageManagerService.java
+index 3e4e7141..97c6d306 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerService.java
++++ b/services/core/java/com/android/server/pm/PackageManagerService.java
+@@ -3336,6 +3336,12 @@ public class PackageManagerService extends IPackageManager.Stub
+                     if (sig != null &&
+                             permissions.contains("android.permission.FAKE_PACKAGE_SIGNATURE")) {
+                         pi.signatures = new Signature[] {new Signature(sig)};
++                        // ATU-L21: Android 9+ API'si (GET_SIGNING_CERTIFICATES → signingInfo) de taklit
++                        // must be spoofed too, otherwise microG self-check and newer GMS clients see the real signature.
++                        if (pi.signingInfo != null) {
++                            pi.signingInfo = new SigningInfo(new SigningDetails(pi.signatures,
++                                    SignatureSchemeVersion.SIGNING_BLOCK_V3, null, null));
++                        }
+                     }
+                 }
+             } catch (Throwable t) {

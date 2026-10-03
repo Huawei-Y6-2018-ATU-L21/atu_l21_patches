@@ -1,0 +1,38 @@
+diff --git a/logging.cpp b/logging.cpp
+index 4942e2f..762fb13 100644
+--- a/logging.cpp
++++ b/logging.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include "android-base/logging.h"
+ 
++#include <new>
++
+ #include <fcntl.h>
+ #include <inttypes.h>
+ #include <libgen.h>
+@@ -467,6 +469,24 @@ class LogMessageData {
+   DISALLOW_COPY_AND_ASSIGN(LogMessageData);
+ };
+ 
++
++// ATU-L21: Android 8.0 vendor ikilileri eski LogMessage(file, line, LogId, LogSeverity, int error)
++// constructor (without tag); Android 12 only has the tagged one. Exported under the same mangled names.
++extern "C" void atu_LogMessage_old_ctor(LogMessage* self, const char* file, unsigned int line, LogId id,
++                                        LogSeverity severity, int error)
++        __asm__("_ZN7android4base10LogMessageC1EPKcjNS0_5LogIdENS0_11LogSeverityEi");
++extern "C" void atu_LogMessage_old_ctor2(LogMessage* self, const char* file, unsigned int line, LogId id,
++                                         LogSeverity severity, int error)
++        __asm__("_ZN7android4base10LogMessageC2EPKcjNS0_5LogIdENS0_11LogSeverityEi");
++extern "C" __attribute__((visibility("default"))) void atu_LogMessage_old_ctor(
++        LogMessage* self, const char* file, unsigned int line, LogId id, LogSeverity severity, int error) {
++  new (self) LogMessage(file, line, id, severity, nullptr, error);
++}
++extern "C" __attribute__((visibility("default"))) void atu_LogMessage_old_ctor2(
++        LogMessage* self, const char* file, unsigned int line, LogId id, LogSeverity severity, int error) {
++  new (self) LogMessage(file, line, id, severity, nullptr, error);
++}
++
+ LogMessage::LogMessage(const char* file, unsigned int line, LogId, LogSeverity severity,
+                        const char* tag, int error)
+     : LogMessage(file, line, severity, tag, error) {}

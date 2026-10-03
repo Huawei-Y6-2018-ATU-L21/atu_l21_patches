@@ -1,0 +1,295 @@
+diff --git a/audio/common/all-versions/default/Android.bp b/audio/common/all-versions/default/Android.bp
+index 8f55744..9b92e50 100644
+--- a/audio/common/all-versions/default/Android.bp
++++ b/audio/common/all-versions/default/Android.bp
+@@ -84,7 +84,10 @@ cc_defaults {
+ cc_library_shared {
+     name: "android.hardware.audio.common@2.0-util",
+     defaults: ["android.hardware.audio.common-util_default"],
+-    srcs: [":android.hardware.audio.common-util@2-6"],
++    srcs: [
++        ":android.hardware.audio.common-util@2-6",
++        "AtuLegacyHidlUtilsV2.cpp", // ATU-L21: Android 8.0 vendor compatibility
++    ],
+     shared_libs: [
+         "android.hardware.audio.common@2.0",
+     ],
+diff --git a/audio/common/all-versions/default/AtuLegacyHidlUtilsV2.cpp b/audio/common/all-versions/default/AtuLegacyHidlUtilsV2.cpp
+new file mode 100644
+index 0000000..426d2e2
+--- /dev/null
++++ b/audio/common/all-versions/default/AtuLegacyHidlUtilsV2.cpp
+@@ -0,0 +1,273 @@
++// ATU-L21: Android 8.0 vendor ses HAL'i (android.hardware.audio@2.0-impl, effect@2.0-impl) eski
++// expects the android::HidlUtils symbols from this library. In Android 12 the class
++// moved under ...::audio::common::V2_0::implementation AND system/audio.h structs grew
++// (audio_offload_info_t'ye alanlar, audio_port_config'e "flags", audio_port dizileri 16->32).
++// Because the vendor allocates memory in the 8.0 layout, conversions use a temporary Android 12 struct and
++// fields are copied one by one into 8.0-layout structs (otherwise the stack overflows).
++#include "HidlUtils.h"
++#include "UuidUtils.h"
++
++#include <string.h>
++
++#include <algorithm>
++#include <memory>
++
++using ::android::hardware::hidl_vec;
++using namespace ::android::hardware::audio::common::V2_0;
++using NewUtils = ::android::hardware::audio::common::V2_0::implementation::HidlUtils;
++using NewUuid = ::android::hardware::audio::common::V2_0::implementation::UuidUtils;
++
++namespace {
++
++// ---- Android 8.0 (O) system/audio.h layout ----
++constexpr int kOMaxRates = 16, kOMaxMasks = 16, kOMaxFormats = 16, kOMaxGains = 16;
++
++struct o_offload_info {
++    uint16_t version;
++    uint16_t size;
++    uint32_t sample_rate;
++    audio_channel_mask_t channel_mask;
++    audio_format_t format;
++    audio_stream_type_t stream_type;
++    uint32_t bit_rate;
++    int64_t duration_us;
++    bool has_video;
++    bool is_streaming;
++    uint32_t bit_width;
++    uint32_t offload_buffer_size;
++    audio_usage_t usage;
++};
++
++struct o_audio_config {
++    uint32_t sample_rate;
++    audio_channel_mask_t channel_mask;
++    audio_format_t format;
++    o_offload_info offload_info;
++    size_t frame_count;
++};
++
++union o_port_config_ext {
++    struct audio_port_config_device_ext device;   // unchanged
++    struct audio_port_config_mix_ext mix;         // unchanged
++    struct audio_port_config_session_ext session; // unchanged
++};
++
++struct o_audio_port_config {
++    audio_port_handle_t id;
++    audio_port_role_t role;
++    audio_port_type_t type;
++    unsigned int config_mask;
++    unsigned int sample_rate;
++    audio_channel_mask_t channel_mask;
++    audio_format_t format;
++    struct audio_gain_config gain;
++    o_port_config_ext ext;  // no "flags" field in 8.0
++};
++
++struct o_port_device_ext {
++    audio_module_handle_t hw_module;
++    audio_devices_t type;
++    char address[AUDIO_DEVICE_MAX_ADDRESS_LEN];
++};
++
++union o_port_ext {
++    o_port_device_ext device;
++    struct audio_port_mix_ext mix;
++    struct audio_port_session_ext session;
++};
++
++struct o_audio_port {
++    audio_port_handle_t id;
++    audio_port_role_t role;
++    audio_port_type_t type;
++    char name[AUDIO_PORT_MAX_NAME_LEN];
++    unsigned int num_sample_rates;
++    unsigned int sample_rates[kOMaxRates];
++    unsigned int num_channel_masks;
++    audio_channel_mask_t channel_masks[kOMaxMasks];
++    unsigned int num_formats;
++    audio_format_t formats[kOMaxFormats];
++    unsigned int num_gains;
++    struct audio_gain gains[kOMaxGains];
++    o_audio_port_config active_config;
++    o_port_ext ext;
++};
++
++// ---- Alan kopyalama (Android 12 <-> 8.0) ----
++void offloadToO(const audio_offload_info_t& n, o_offload_info* o) {
++    memset(o, 0, sizeof(*o));
++    o->version = AUDIO_MAKE_OFFLOAD_INFO_VERSION(0, 1);
++    o->size = sizeof(*o);
++    o->sample_rate = n.sample_rate;
++    o->channel_mask = n.channel_mask;
++    o->format = n.format;
++    o->stream_type = n.stream_type;
++    o->bit_rate = n.bit_rate;
++    o->duration_us = n.duration_us;
++    o->has_video = n.has_video;
++    o->is_streaming = n.is_streaming;
++    o->bit_width = n.bit_width;
++    o->offload_buffer_size = n.offload_buffer_size;
++    o->usage = n.usage;
++}
++
++void offloadFromO(const o_offload_info& o, audio_offload_info_t* n) {
++    *n = AUDIO_INFO_INITIALIZER;
++    n->sample_rate = o.sample_rate;
++    n->channel_mask = o.channel_mask;
++    n->format = o.format;
++    n->stream_type = o.stream_type;
++    n->bit_rate = o.bit_rate;
++    n->duration_us = o.duration_us;
++    n->has_video = o.has_video;
++    n->is_streaming = o.is_streaming;
++    n->bit_width = o.bit_width;
++    n->offload_buffer_size = o.offload_buffer_size;
++    n->usage = o.usage;
++}
++
++void portConfigToO(const audio_port_config& n, o_audio_port_config* o) {
++    memset(o, 0, sizeof(*o));
++    o->id = n.id;
++    o->role = n.role;
++    o->type = n.type;
++    o->config_mask = n.config_mask;
++    o->sample_rate = n.sample_rate;
++    o->channel_mask = n.channel_mask;
++    o->format = n.format;
++    o->gain = n.gain;
++    memcpy(&o->ext, &n.ext, sizeof(o->ext));
++}
++
++void portConfigFromO(const o_audio_port_config& o, audio_port_config* n) {
++    memset(n, 0, sizeof(*n));
++    n->id = o.id;
++    n->role = o.role;
++    n->type = o.type;
++    n->config_mask = o.config_mask;
++    n->sample_rate = o.sample_rate;
++    n->channel_mask = o.channel_mask;
++    n->format = o.format;
++    n->gain = o.gain;
++    memcpy(&n->ext, &o.ext, sizeof(o.ext));
++}
++
++void portToO(const audio_port& n, o_audio_port* o) {
++    memset(o, 0, sizeof(*o));
++    o->id = n.id;
++    o->role = n.role;
++    o->type = n.type;
++    memcpy(o->name, n.name, sizeof(o->name));
++    o->num_sample_rates = std::min<unsigned>(n.num_sample_rates, kOMaxRates);
++    memcpy(o->sample_rates, n.sample_rates, o->num_sample_rates * sizeof(o->sample_rates[0]));
++    o->num_channel_masks = std::min<unsigned>(n.num_channel_masks, kOMaxMasks);
++    memcpy(o->channel_masks, n.channel_masks, o->num_channel_masks * sizeof(o->channel_masks[0]));
++    o->num_formats = std::min<unsigned>(n.num_formats, kOMaxFormats);
++    memcpy(o->formats, n.formats, o->num_formats * sizeof(o->formats[0]));
++    o->num_gains = std::min<unsigned>(n.num_gains, kOMaxGains);
++    memcpy(o->gains, n.gains, o->num_gains * sizeof(o->gains[0]));
++    portConfigToO(n.active_config, &o->active_config);
++    memcpy(&o->ext, &n.ext, sizeof(o->ext));  // the 8.0 prefix of the device ext is the same
++}
++
++void portFromO(const o_audio_port& o, audio_port* n) {
++    memset(n, 0, sizeof(*n));
++    n->id = o.id;
++    n->role = o.role;
++    n->type = o.type;
++    memcpy(n->name, o.name, sizeof(o.name));
++    n->num_sample_rates = std::min<unsigned>(o.num_sample_rates, kOMaxRates);
++    memcpy(n->sample_rates, o.sample_rates, n->num_sample_rates * sizeof(n->sample_rates[0]));
++    n->num_channel_masks = std::min<unsigned>(o.num_channel_masks, kOMaxMasks);
++    memcpy(n->channel_masks, o.channel_masks, n->num_channel_masks * sizeof(n->channel_masks[0]));
++    n->num_formats = std::min<unsigned>(o.num_formats, kOMaxFormats);
++    memcpy(n->formats, o.formats, n->num_formats * sizeof(n->formats[0]));
++    n->num_gains = std::min<unsigned>(o.num_gains, kOMaxGains);
++    memcpy(n->gains, o.gains, n->num_gains * sizeof(n->gains[0]));
++    portConfigFromO(o.active_config, &n->active_config);
++    memcpy(&n->ext, &o.ext, sizeof(o.ext));
++}
++
++}  // namespace
++
++namespace android {
++
++// Old (Android 8.0) signatures; symbol names match the vendor binaries exactly. Parameter types
++// use the new struct names for mangling but are treated as the 8.0 layout in memory.
++struct __attribute__((visibility("default"))) HidlUtils {
++    static void audioConfigFromHal(const audio_config_t& hal, AudioConfig* c);
++    static void audioConfigToHal(const AudioConfig& c, audio_config_t* hal);
++    static void audioPortConfigToHal(const AudioPortConfig& c, struct audio_port_config* hal);
++    static std::unique_ptr<audio_port_config[]> audioPortConfigsToHal(
++            const hidl_vec<AudioPortConfig>& configs);
++    static void audioPortFromHal(const struct audio_port& hal, AudioPort* p);
++    static void audioPortToHal(const AudioPort& p, struct audio_port* hal);
++    static void uuidFromHal(const audio_uuid_t& hal, Uuid* uuid);
++    static void uuidToHal(const Uuid& uuid, audio_uuid_t* hal);
++};
++
++void HidlUtils::audioConfigFromHal(const audio_config_t& hal, AudioConfig* c) {
++    const auto& o = reinterpret_cast<const o_audio_config&>(hal);
++    audio_config_t n = AUDIO_CONFIG_INITIALIZER;
++    n.sample_rate = o.sample_rate;
++    n.channel_mask = o.channel_mask;
++    n.format = o.format;
++    offloadFromO(o.offload_info, &n.offload_info);
++    n.frame_count = o.frame_count;
++    NewUtils::audioConfigFromHal(n, false, c);
++}
++
++void HidlUtils::audioConfigToHal(const AudioConfig& c, audio_config_t* hal) {
++    audio_config_t n = AUDIO_CONFIG_INITIALIZER;
++    NewUtils::audioConfigToHal(c, &n);
++    auto* o = reinterpret_cast<o_audio_config*>(hal);
++    memset(o, 0, sizeof(*o));
++    o->sample_rate = n.sample_rate;
++    o->channel_mask = n.channel_mask;
++    o->format = n.format;
++    offloadToO(n.offload_info, &o->offload_info);
++    o->frame_count = n.frame_count;
++}
++
++void HidlUtils::audioPortConfigToHal(const AudioPortConfig& c, struct audio_port_config* hal) {
++    audio_port_config n;
++    memset(&n, 0, sizeof(n));
++    NewUtils::audioPortConfigToHal(c, &n);
++    portConfigToO(n, reinterpret_cast<o_audio_port_config*>(hal));
++}
++
++std::unique_ptr<audio_port_config[]> HidlUtils::audioPortConfigsToHal(
++        const hidl_vec<AudioPortConfig>& configs) {
++    // The vendor indexes the array with the 8.0 element size; memory is allocated in the 8.0 layout.
++    auto* arr = new o_audio_port_config[configs.size()];
++    for (size_t i = 0; i < configs.size(); ++i) {
++        audio_port_config n;
++        memset(&n, 0, sizeof(n));
++        NewUtils::audioPortConfigToHal(configs[i], &n);
++        portConfigToO(n, &arr[i]);
++    }
++    return std::unique_ptr<audio_port_config[]>(reinterpret_cast<audio_port_config*>(arr));
++}
++
++void HidlUtils::audioPortFromHal(const struct audio_port& hal, AudioPort* p) {
++    audio_port n;
++    portFromO(reinterpret_cast<const o_audio_port&>(hal), &n);
++    NewUtils::audioPortFromHal(n, p);
++}
++
++void HidlUtils::audioPortToHal(const AudioPort& p, struct audio_port* hal) {
++    audio_port n;
++    memset(&n, 0, sizeof(n));
++    NewUtils::audioPortToHal(p, &n);
++    portToO(n, reinterpret_cast<o_audio_port*>(hal));
++}
++
++void HidlUtils::uuidFromHal(const audio_uuid_t& hal, Uuid* uuid) {
++    NewUuid::uuidFromHal(hal, uuid);  // audio_uuid_t layout is unchanged
++}
++
++void HidlUtils::uuidToHal(const Uuid& uuid, audio_uuid_t* hal) {
++    NewUuid::uuidToHal(uuid, hal);
++}
++
++}  // namespace android

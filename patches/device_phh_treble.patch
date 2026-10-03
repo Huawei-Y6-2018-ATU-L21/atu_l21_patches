@@ -1,0 +1,27 @@
+diff --git a/base.mk b/base.mk
+index d3a0a20..db9fe13 100644
+--- a/base.mk
++++ b/base.mk
+@@ -29,7 +29,7 @@ PRODUCT_SYSTEM_DEFAULT_PROPERTIES += \
+ 	ro.build.version.release=$(PLATFORM_VERSION) \
+ 	ro.build.version.security_patch=$(PLATFORM_SECURITY_PATCH) \
+ 	ro.adb.secure=0 \
+-	ro.logd.auditd=true
++	ro.logd.auditd=false # ATU-L21: permissive audit records flood logd
+ 	
+ #Huawei HiSuite (also other OEM custom programs I guess) it's of no use in AOSP builds
+ PRODUCT_SYSTEM_DEFAULT_PROPERTIES += \
+diff --git a/bluetooth/bdroid_buildcfg.h b/bluetooth/bdroid_buildcfg.h
+index 166bd4a..6537f1f 100644
+--- a/bluetooth/bdroid_buildcfg.h
++++ b/bluetooth/bdroid_buildcfg.h
+@@ -37,7 +37,8 @@ static inline const char* BtmDefLocalName()
+     // Fallback to ro.product.model
+     return "";
+ #endif
+-    return "hello";
++    // ATU-L21: the phh default was "hello"; use the device name.
++    return "HUAWEI ATU-L21";
+ }
+ 
+ static inline int BtmBypassExtraAclSetup() {

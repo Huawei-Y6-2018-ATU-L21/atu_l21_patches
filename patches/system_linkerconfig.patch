@@ -1,0 +1,187 @@
+diff --git a/contents/configuration/legacy.cc b/contents/configuration/legacy.cc
+index b857a3d..90d5de8 100644
+--- a/contents/configuration/legacy.cc
++++ b/contents/configuration/legacy.cc
+@@ -30,9 +30,17 @@ android::linkerconfig::modules::Configuration CreateLegacyConfiguration(
+   ctx.SetCurrentLinkerConfigType(LinkerConfigType::Legacy);
+ 
+   sections.emplace_back(BuildLegacySection(ctx));
++  sections.emplace_back(BuildLegacyVendorSection(ctx));  // ATU-L21
+   sections.emplace_back(BuildPostInstallSection(ctx));
+ 
+   const std::vector<DirToSection> kDirToSection = {
++      // ATU-L21: 8.0 vendor programs that need Android 9 (v28) protobuf: RIL (libsettings) and
++      // Widevine (libwvhidl/libwvdrmengine). Bionic in this tree also matches full file paths.
++      {"/vendor/bin/hw/rild", "legacy_vendor"},
++      {"/vendor/bin/hw/android.hardware.drm@1.0-service.widevine", "legacy_vendor"},
++      // Note: android.hardware.drm@1.0-service (clearkey) is NOT here — Android 12 libmediadrm needs the new protobuf.
++      // Ses HAL'i: soundfx/libaudiopreprocessing → libwebrtc_audio_preprocessing (8.0 /system, protobuf-lite v28).
++      {"/vendor/bin/hw/android.hardware.audio@2.0-service", "legacy_vendor"},
+       // All binaries gets the same configuration 'legacy'
+       {"/system", "legacy"},
+       {Var("SYSTEM_EXT"), "legacy"},
+diff --git a/contents/context/context.cc b/contents/context/context.cc
+index 02003a4..dc891ef 100644
+--- a/contents/context/context.cc
++++ b/contents/context/context.cc
+@@ -98,7 +98,8 @@ std::string Var(const std::string& name) {
+   if (val.has_value()) {
+     return *val;
+   }
+-  CHECK(!"undefined var") << name << " is not defined";
++  // ATU-L21: a VNDK-less (Android 8.0) vendor has no VNDK list variables; return empty instead of aborting.
++  LOG(WARNING) << "ATU: undefined var " << name << ", using empty";
+   return "";
+ }
+ 
+diff --git a/contents/include/linkerconfig/sectionbuilder.h b/contents/include/linkerconfig/sectionbuilder.h
+index 4930c74..8fa45b4 100644
+--- a/contents/include/linkerconfig/sectionbuilder.h
++++ b/contents/include/linkerconfig/sectionbuilder.h
+@@ -43,6 +43,7 @@ SectionBuilder BuildVendorSection;
+ SectionBuilder BuildProductSection;
+ SectionBuilder BuildUnrestrictedSection;
+ SectionBuilder BuildLegacySection;
++SectionBuilder BuildLegacyVendorSection;  // ATU-L21
+ SectionBuilder BuildPostInstallSection;
+ SectionBuilder BuildRecoverySection;
+ SectionBuilder BuildIsolatedSection;
+diff --git a/contents/namespace/sphal.cc b/contents/namespace/sphal.cc
+index 729b9b0..79ffb16 100644
+--- a/contents/namespace/sphal.cc
++++ b/contents/namespace/sphal.cc
+@@ -24,6 +24,7 @@
+ //
+ // Note that there is no link from the default namespace to this namespace.
+ 
++#include "linkerconfig/environment.h"
+ #include "linkerconfig/namespacebuilder.h"
+ 
+ using android::linkerconfig::modules::Namespace;
+@@ -46,7 +47,12 @@ Namespace BuildSphalNamespace([[maybe_unused]] const Context& ctx) {
+   ns.AddPermittedPath("/vendor/${LIB}");
+   ns.AddPermittedPath("/system/vendor/${LIB}");
+ 
+-  if (ctx.IsApexBinaryConfig() && !ctx.IsVndkAvailable()) {
++  // ATU-L21: the GSI base ships the com.android.vndk.current APEX so IsVndkAvailable() is true,
++  // but the 8.0 vendor does not use VNDK (no ro.vndk.version at boot -> IsLegacyDevice). In APEX
++  // processes (e.g. mediaswcodec) the vendor gralloc mapper could not reach /system libraries and
++  // aborted with "gralloc-mapper is missing" -> video could not be decoded to a surface.
++  if (ctx.IsApexBinaryConfig() &&
++      (!ctx.IsVndkAvailable() || android::linkerconfig::modules::IsLegacyDevice())) {
+     // If device is legacy, let Sphal libraries access to system lib path for
+     // VNDK-SP libraries
+     ns.AddSearchPath("/system/${LIB}");
+diff --git a/contents/namespace/systemdefault.cc b/contents/namespace/systemdefault.cc
+index 0d5c42b..74c28ac 100644
+--- a/contents/namespace/systemdefault.cc
++++ b/contents/namespace/systemdefault.cc
+@@ -104,6 +104,9 @@ Namespace BuildSystemDefaultNamespace([[maybe_unused]] const Context& ctx) {
+   if (!is_fully_treblelized) {
+     ns.AddSearchPath("/vendor/${LIB}");
+     ns.AddSearchPath("/odm/${LIB}");
++    // ATU-L21: 8.0 vendor libraries (FM, ANT, libbt-hidlclient) in the hw directory
++    // need android.hardware.bluetooth@1.0-impl-qti.so by name (it was on the 8.0 legacy search path).
++    ns.AddSearchPath("/vendor/${LIB}/hw");
+   }
+ 
+   if (is_fully_treblelized) {
+diff --git a/contents/section/legacy.cc b/contents/section/legacy.cc
+index 0a53a13..2acc85b 100644
+--- a/contents/section/legacy.cc
++++ b/contents/section/legacy.cc
+@@ -44,6 +44,26 @@ Section BuildLegacySection(Context& ctx) {
+ 
+   return BuildSection(ctx, "legacy", std::move(namespaces), visible_apexes);
+ }
++
++// ATU-L21: copy of the legacy section for Android 8.0 vendor binaries; old-ABI compat
++// libraries (e.g. Android 9 protobuf) are loaded from /system/${LIB}/atu-compat before system ones.
++Section BuildLegacyVendorSection(Context& ctx) {
++  ctx.SetCurrentSection(SectionType::System);
++  std::vector<Namespace> namespaces;
++
++  auto ns = BuildSystemDefaultNamespace(ctx);
++  ns.PrependSearchPath("/system/${LIB}/atu-compat");
++  namespaces.emplace_back(std::move(ns));
++
++  std::set<std::string> visible_apexes;
++  for (const auto& apex : ctx.GetApexModules()) {
++    if (apex.jni_libs.size() > 0 || apex.public_libs.size() > 0) {
++      visible_apexes.insert(apex.name);
++    }
++  }
++
++  return BuildSection(ctx, "legacy_vendor", std::move(namespaces), visible_apexes);
++}
+ }  // namespace contents
+ }  // namespace linkerconfig
+ }  // namespace android
+diff --git a/generator/variableloader.cc b/generator/variableloader.cc
+index 14e78a8..b15591f 100644
+--- a/generator/variableloader.cc
++++ b/generator/variableloader.cc
+@@ -130,6 +130,18 @@ void LoadLibraryListVariables(const std::string& root) {
+   auto sanitizer_library_path = root + "/system/etc/sanitizer.libraries.txt";
+   Variables::AddValue("SANITIZER_RUNTIME_LIBRARIES",
+                       GetLibrariesString(sanitizer_library_path));
++
++  // ATU-L21: a VNDK-less (Android 8.0) vendor has no VNDK APEX; list variables are not loaded and
++  // APEX configs abort with "undefined var". Define the missing ones as empty.
++  for (const std::string partition : {"VENDOR", "PRODUCT"}) {
++    for (const std::string prefix :
++         {"LLNDK_LIBRARIES_", "PRIVATE_LLNDK_LIBRARIES_", "VNDK_SAMEPROCESS_LIBRARIES_",
++          "VNDK_CORE_LIBRARIES_", "SANITIZER_DEFAULT_"}) {
++      if (!Variables::GetValue(prefix + partition).has_value()) {
++        Variables::AddValue(prefix + partition, "");
++      }
++    }
++  }
+ }
+ }  // namespace
+ 
+diff --git a/modules/include/linkerconfig/link.h b/modules/include/linkerconfig/link.h
+index e84e23e..148966b 100644
+--- a/modules/include/linkerconfig/link.h
++++ b/modules/include/linkerconfig/link.h
+@@ -66,7 +66,8 @@ class Link {
+ template <typename... Args>
+ void Link::AddSharedLib(const std::string& lib_name, Args&&... lib_names) {
+   if (!allow_all_shared_libs_) {
+-    shared_libs_.push_back(lib_name);
++    // ATU-L21: skip empty names but keep processing the rest.
++    if (!std::string(lib_name).empty()) shared_libs_.push_back(lib_name);
+     if constexpr (sizeof...(Args) > 0) {
+       AddSharedLib(std::forward<Args>(lib_names)...);
+     }
+diff --git a/modules/include/linkerconfig/namespace.h b/modules/include/linkerconfig/namespace.h
+index 8e531ae..f0a3ed3 100644
+--- a/modules/include/linkerconfig/namespace.h
++++ b/modules/include/linkerconfig/namespace.h
+@@ -44,6 +44,10 @@ class Namespace {
+ 
+   // Add path to search path
+   void AddSearchPath(const std::string& path);
++  // ATU-L21: prepend a search path (vendor compat libraries are found before system ones)
++  void PrependSearchPath(const std::string& path) {
++    search_paths_.insert(search_paths_.begin(), path);
++  }
+ 
+   // Add path to permitted path
+   void AddPermittedPath(const std::string& path);
+diff --git a/modules/link.cc b/modules/link.cc
+index 9bf4c10..f4fed47 100644
+--- a/modules/link.cc
++++ b/modules/link.cc
+@@ -24,7 +24,10 @@ namespace modules {
+ 
+ void Link::AddSharedLib(const std::vector<std::string>& lib_names) {
+   if (!allow_all_shared_libs_) {
+-    shared_libs_.insert(shared_libs_.end(), lib_names.begin(), lib_names.end());
++    // ATU-L21: do not add a "" element when VNDK variables are empty (bionic rejects the empty list).
++    for (const auto& lib : lib_names) {
++      if (!lib.empty()) shared_libs_.push_back(lib);
++    }
+   }
+ }
+ 

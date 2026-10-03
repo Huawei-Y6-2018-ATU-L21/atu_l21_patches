@@ -1,0 +1,137 @@
+diff --git a/media/codec2/sfplugin/CCodec.cpp b/media/codec2/sfplugin/CCodec.cpp
+index 82460c9..0a4b9c6 100644
+--- a/media/codec2/sfplugin/CCodec.cpp
++++ b/media/codec2/sfplugin/CCodec.cpp
+@@ -1464,7 +1464,9 @@ sp<PersistentSurface> CCodec::CreateOmxInputSurface() {
+     using namespace android::hardware::media::omx::V1_0::utils;
+     using namespace android::hardware::graphics::bufferqueue::V1_0::utils;
+     typedef android::hardware::media::omx::V1_0::Status OmxStatus;
+-    android::sp<IOmx> omx = IOmx::getService();
++    // ATU-L21: the 8.0 vendor OMX service does not run on Android 12 but is declared; getService() waits
++    // forever and blocks the codec list (and the apps asking for it). Return nullptr at once if not running.
++    android::sp<IOmx> omx = IOmx::tryGetService();
+     typedef android::hardware::graphics::bufferqueue::V1_0::
+             IGraphicBufferProducer HGraphicBufferProducer;
+     typedef android::hardware::media::omx::V1_0::
+diff --git a/media/codec2/sfplugin/Codec2InfoBuilder.cpp b/media/codec2/sfplugin/Codec2InfoBuilder.cpp
+index 7c4bfb6..8ceb7af 100644
+--- a/media/codec2/sfplugin/Codec2InfoBuilder.cpp
++++ b/media/codec2/sfplugin/Codec2InfoBuilder.cpp
+@@ -397,8 +397,10 @@ status_t Codec2InfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
+     }
+ 
+     if (parser.getParsingStatus() != OK) {
+-        ALOGD("XML parser no good");
+-        return OK;
++        // ATU-L21: the 8.0 vendor media_codecs_performance.xml references undefined OMX codecs
++        // (e.g. OMX.qti.video.decoder.mpeg4sw) -> BAD_VALUE. Returning here dropped all Codec2 software
++        // codecs from the list (codec count = 0). Continue with the entries that did parse.
++        ALOGW("XML parser reported errors; continuing with successfully parsed entries");
+     }
+ 
+     MediaCodecsXmlParser::AttributeMap settings = parser.getServiceAttributeMap();
+diff --git a/media/libmediaplayerservice/MediaPlayerService.cpp b/media/libmediaplayerservice/MediaPlayerService.cpp
+index f85887e..1348d03 100644
+--- a/media/libmediaplayerservice/MediaPlayerService.cpp
++++ b/media/libmediaplayerservice/MediaPlayerService.cpp
+@@ -886,7 +886,7 @@ sp<MediaPlayerBase> MediaPlayerService::Client::setDataSource_pre(
+         // Listen to death of OMX service
+         {
+             sp<IBase> base = ::android::hardware::media::omx::V1_0::
+-                    IOmx::getService();
++                    IOmx::tryGetService();  // ATU-L21: do not wait if OMX is not running
+             if (base == nullptr) {
+                 ALOGD("OMX service is not available");
+             } else {
+diff --git a/media/libmediaplayerservice/MediaRecorderClient.cpp b/media/libmediaplayerservice/MediaRecorderClient.cpp
+index a914006..9873eab 100644
+--- a/media/libmediaplayerservice/MediaRecorderClient.cpp
++++ b/media/libmediaplayerservice/MediaRecorderClient.cpp
+@@ -461,7 +461,7 @@ status_t MediaRecorderClient::setListener(const sp<IMediaRecorderClient>& listen
+         // Listen to OMX's IOmxStore/default
+         {
+             sp<IBase> base = ::android::hardware::media::omx::V1_0::
+-                    IOmx::getService();
++                    IOmx::tryGetService();  // ATU-L21: do not wait if OMX is not running
+             if (base == nullptr) {
+                 ALOGD("OMX service is not available");
+             } else {
+diff --git a/media/libstagefright/OMXClient.cpp b/media/libstagefright/OMXClient.cpp
+index 9375de1..40cf5bc 100644
+--- a/media/libstagefright/OMXClient.cpp
++++ b/media/libstagefright/OMXClient.cpp
+@@ -45,7 +45,9 @@ status_t OMXClient::connect(const char* name) {
+     if (name == nullptr) {
+         name = "default";
+     }
+-    sp<IOmx> tOmx = IOmx::getService(name);
++    // ATU-L21: the 8.0 vendor OMX service does not run on Android 12 but is declared; getService() waits
++    // forever and blocks the codec list (and the apps asking for it). Return nullptr at once if not running.
++    sp<IOmx> tOmx = IOmx::tryGetService(name);
+     if (tOmx.get() == nullptr) {
+         ALOGE("Cannot obtain IOmx service.");
+         return NO_INIT;
+diff --git a/media/libstagefright/OmxInfoBuilder.cpp b/media/libstagefright/OmxInfoBuilder.cpp
+index 79ffdeb..2924325 100644
+--- a/media/libstagefright/OmxInfoBuilder.cpp
++++ b/media/libstagefright/OmxInfoBuilder.cpp
+@@ -93,7 +93,9 @@ OmxInfoBuilder::OmxInfoBuilder(bool allowSurfaceEncoders)
+ 
+ status_t OmxInfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
+     // Obtain IOmxStore
+-    sp<IOmxStore> omxStore = IOmxStore::getService();
++    // ATU-L21: the 8.0 vendor OMX service does not run on Android 12 but is declared; getService() waits
++    // forever and blocks the codec list (and the apps asking for it). Return nullptr at once if not running.
++    sp<IOmxStore> omxStore = IOmxStore::tryGetService();
+     if (omxStore == nullptr) {
+         ALOGE("Cannot find an IOmxStore service.");
+         return NO_INIT;
+@@ -125,8 +127,9 @@ status_t OmxInfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
+         return NO_INIT;
+     }
+     if (status != Status::OK) {
+-        ALOGE("IOmxStore reports parsing error.");
+-        return NO_INIT;
++        // ATU-L21: the 8.0 vendor media_codecs_performance.xml references an undefined codec; this single error
++        // dropped all OMX (hardware) codecs from the list. Roles are already fetched; warn and continue.
++        ALOGW("IOmxStore reports parsing error; continuing with listed roles");
+     }
+     for (const auto& p : serviceAttributes) {
+         writer->addGlobalSetting(
+diff --git a/services/mediacodec/Android.bp b/services/mediacodec/Android.bp
+index bf4d524..0c97961 100644
+--- a/services/mediacodec/Android.bp
++++ b/services/mediacodec/Android.bp
+@@ -155,3 +155,32 @@ prebuilt_etc {
+         "code_coverage.policy",
+     ],
+ }
++
++// ATU-L21: the 8.0 vendor OMX service links Android 8.0 system libraries (libmediacodecservice etc.) and
++// does not start on Android 12. System variant built from the same source; it loads the Qualcomm
++// hardware codec plugin (/vendor/lib/libstagefrighthw.so). No software OMX codecs (Codec2 provides them).
++cc_binary {
++    name: "atu_omx_service",
++    stem: "android.hardware.media.omx@1.0-service",
++    relative_install_path: "hw",
++    srcs: ["main_codecservice.cpp"],
++    shared_libs: [
++        "libbinder",
++        "libutils",
++        "liblog",
++        "libbase",
++        "libavservices_minijail",
++        "libcutils",
++        "libhidlbase",
++        "libstagefright_omx",
++        "libstagefright_xmlparser",
++        "android.hardware.media.omx@1.0",
++        "android.hidl.memory@1.0",
++    ],
++    compile_multilib: "32",
++    cflags: [
++        "-Werror",
++        "-Wall",
++        "-Wno-error=deprecated-declarations",
++    ],
++}

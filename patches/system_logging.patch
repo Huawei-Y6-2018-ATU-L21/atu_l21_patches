@@ -1,0 +1,11 @@
+diff --git a/liblog/liblog.map.txt b/liblog/liblog.map.txt
+index f8d5ef0..4f4b4b3 100644
+--- a/liblog/liblog.map.txt
++++ b/liblog/liblog.map.txt
+@@ -90,4 +90,6 @@ LIBLOG_PRIVATE {
+     android_log_read_next;
+     android_log_write_list_buffer;
+     create_android_log_parser;
++    android_log_shouldPrintLine;
++    android_log_printLogLine;
+ };

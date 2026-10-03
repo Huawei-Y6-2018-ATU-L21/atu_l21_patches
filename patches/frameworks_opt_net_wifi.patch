@@ -1,0 +1,14 @@
+diff --git a/libwifi_system/Android.bp b/libwifi_system/Android.bp
+index ec02012..8f9774f 100644
+--- a/libwifi_system/Android.bp
++++ b/libwifi_system/Android.bp
+@@ -42,6 +42,9 @@ cc_library {
+         "libbase",
+         "libcrypto",
+         "libcutils",
++        // ATU-L21: Android 8.0 vendor wifi services look for InterfaceTool in libwifi-system;
++        // moved to libwifi-system-iface in Android 12. Loaded as a dependency.
++        "libwifi-system-iface",
+     ],
+     srcs: [
+         "hostapd_manager.cpp",

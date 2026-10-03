@@ -1,0 +1,18 @@
+diff --git a/tinyxml2.cpp b/tinyxml2.cpp
+index 9e7ff1a..3dec4a8 100644
+--- a/tinyxml2.cpp
++++ b/tinyxml2.cpp
+@@ -2106,6 +2106,13 @@ const char* XMLDocument::_errorNames[XML_ERROR_COUNT] = {
+ };
+ 
+ 
++// ATU-L21: Android 8.0 vendor binaries (e.g. Huawei iawareperf) need the old XMLDocument(bool) constructor.
++extern "C" __attribute__((visibility("default"))) void atu_xmldoc_ctor(XMLDocument* self, bool processEntities)
++        __asm__("_ZN8tinyxml211XMLDocumentC1Eb");
++extern "C" void atu_xmldoc_ctor(XMLDocument* self, bool processEntities) {
++    new (self) XMLDocument(processEntities, PRESERVE_WHITESPACE);
++}
++
+ XMLDocument::XMLDocument( bool processEntities, Whitespace whitespaceMode ) :
+     XMLNode( 0 ),
+     _writeBOM( false ),

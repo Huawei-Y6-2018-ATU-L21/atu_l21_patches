@@ -1,0 +1,109 @@
+diff --git a/cmds/servicemanager/Android.bp b/cmds/servicemanager/Android.bp
+index 3ebdeee..b7a86f3 100644
+--- a/cmds/servicemanager/Android.bp
++++ b/cmds/servicemanager/Android.bp
+@@ -69,3 +69,15 @@ cc_test {
+     ],
+     static_libs: ["libgmock"],
+ }
++
++// ATU-L21: the 8.0 vendor vndservicemanager fails to link on Android 12 because of libhwlog;
++// /system/bin/vndservicemanager (system variant) is built from the same source (atu-shim.rc overrides the service).
++cc_binary {
++    name: "atu_vndservicemanager",
++    stem: "vndservicemanager",
++    defaults: ["servicemanager_defaults"],
++    cflags: [
++        "-DVENDORSERVICEMANAGER=1",
++    ],
++    srcs: ["main.cpp"],
++}
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+index 617708f..f84f1e5 100644
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -77,12 +77,12 @@ static size_t pad_size(size_t s) {
+ 
+ namespace android {
+ 
++// ATU-L21: stack-size compatibility with 8.0 vendor binaries (see Parcel.h).
++static_assert(sizeof(Parcel) == (sizeof(void*) == 8 ? 104 : 52),
++              "Parcel size must match the Android 8.0 vendor ABI");
++
+ // many things compile this into prebuilts on the stack
+-#ifdef __LP64__
+-static_assert(sizeof(Parcel) == 120);
+-#else
+-static_assert(sizeof(Parcel) == 60);
+-#endif
++// ATU-L21: 8.0 sizes instead of upstream 120/60 (static_assert above).
+ 
+ static std::atomic<size_t> gParcelGlobalAllocCount;
+ static std::atomic<size_t> gParcelGlobalAllocSize;
+diff --git a/libs/binder/include/binder/Parcel.h b/libs/binder/include/binder/Parcel.h
+index 5aaaa0c..46384ef 100644
+--- a/libs/binder/include/binder/Parcel.h
++++ b/libs/binder/include/binder/Parcel.h
+@@ -1120,19 +1120,21 @@ private:
+     size_t              mObjectsSize;
+     size_t              mObjectsCapacity;
+     mutable size_t      mNextObjectHint;
+-    mutable bool        mObjectsSorted;
+-
+-    mutable bool        mRequestHeaderPresent;
+-
+-    mutable size_t      mWorkSourceRequestHeaderPosition;
+-
+-    mutable bool        mFdsKnown;
+-    mutable bool        mHasFds;
+-    bool                mAllowFds;
+ 
++    // ATU-L21: Android 8.0 vendor binaries allocate Parcel on the stack with the 8.0 size (64-bit 104 B, 32-bit 52 B);
++    // the Android 12 layout (120/60 B) overflowed and overwrote adjacent memory (RIL, camera, display tools).
++    // Flags and the work-source header position are packed into one 32-bit word -> size and first field offsets
++    // match 8.0 (see static_assert in Parcel.cpp). The wire protocol is unchanged. (Binder transaction data
++    // is at most a few MB; a 26-bit position is enough.)
++    mutable uint32_t    mWorkSourceRequestHeaderPosition : 26;
++    mutable uint32_t    mObjectsSorted : 1;
++    mutable uint32_t    mRequestHeaderPresent : 1;
++    mutable uint32_t    mFdsKnown : 1;
++    mutable uint32_t    mHasFds : 1;
++    uint32_t            mAllowFds : 1;
+     // if this parcelable is involved in a secure transaction, force the
+     // data to be overridden with zero when deallocated
+-    mutable bool        mDeallocZero;
++    mutable uint32_t    mDeallocZero : 1;
+ 
+     release_func        mOwner;
+ 
+diff --git a/libs/renderengine/gl/GLESRenderEngine.cpp b/libs/renderengine/gl/GLESRenderEngine.cpp
+index 467f848..4376122 100644
+--- a/libs/renderengine/gl/GLESRenderEngine.cpp
++++ b/libs/renderengine/gl/GLESRenderEngine.cpp
+@@ -31,6 +31,7 @@
+ #include <android-base/stringprintf.h>
+ #include <cutils/compiler.h>
+ #include <cutils/properties.h>
++#include <string.h>
+ #include <gui/DebugEGLImageTracker.h>
+ #include <renderengine/Mesh.h>
+ #include <renderengine/Texture.h>
+@@ -300,6 +301,18 @@ std::unique_ptr<GLESRenderEngine> GLESRenderEngine::create(const RenderEngineCre
+     extensions.initWithGLStrings(glGetString(GL_VENDOR), glGetString(GL_RENDERER),
+                                  glGetString(GL_VERSION), glGetString(GL_EXTENSIONS));
+ 
++    // ATU-L21: the 8.0 Adreno 308 driver spends ~75 ms of CPU per frame on GMEM binning/resolve
++    // during composition. Request direct-to-framebuffer rendering via GL_QCOM_binning_control.
++    // debug.atu.re_binning: 0=driver default, 1=CPU_OPTIMIZED, 2=GPU_OPTIMIZED, 3=DIRECT (default)
++    if (strstr(extensions.getExtensions(), "GL_QCOM_binning_control")) {
++        static const GLenum kModes[] = {0, 0x8FB1, 0x8FB2, 0x8FB3};
++        const int mode = property_get_int32("debug.atu.re_binning", 3);
++        if (mode > 0 && mode < 4) {
++            glHint(0x8FB0 /* GL_BINNING_CONTROL_HINT_QCOM */, kModes[mode]);
++            ALOGI("ATU: GL_BINNING_CONTROL_HINT_QCOM mode %d, glGetError=0x%x", mode, glGetError());
++        }
++    }
++
+     EGLSurface protectedStub = EGL_NO_SURFACE;
+     if (protectedContext != EGL_NO_CONTEXT && !extensions.hasSurfacelessContext()) {
+         protectedStub = createStubEglPbufferSurface(display, config, args.pixelFormat,
