@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LineageOS 17.1 + phh treble (AndyYan's lineage_build_unified, lineage-17.1) + Huawei Y6 2018 (ATU-L21). -->
+<manifest>
+  <project name="phhusson/vendor_hardware_overlay" path="vendor/hardware_overlay" remote="github" revision="pie" />
+  <project name="phhusson/device_phh_treble" path="device/phh/treble" remote="github" revision="android-10.0" />
+  <project name="phhusson/vendor_vndk" path="vendor/vndk" remote="github" revision="android-10.0" />
+  <project name="phhusson/vendor_vndk-tests" path="vendor/vndk-tests" remote="github" revision="master" />
+  <project name="phhusson/vendor_interfaces" path="vendor/interfaces" remote="github" revision="pie" />
+  <project name="phhusson/vendor_magisk" path="vendor/magisk" remote="github" revision="android-10.0" />
+  <project name="Huawei-Y6-2018-ATU-L21/android_device_huawei_atu_l21" path="device/atu" remote="github" revision="lineage-17.1" />
+  <project name="Huawei-Y6-2018-ATU-L21/android_vendor_atu" path="vendor/atu" remote="github" revision="lineage-17.1" />
+  <!-- Not needed for a system image; very large. -->
+  <remove-project name="platform/prebuilts/android-emulator" />
+</manifest>

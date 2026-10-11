@@ -1,0 +1,54 @@
+diff --git a/libs/binder/include/binder/Parcel.h b/libs/binder/include/binder/Parcel.h
+--- a/libs/binder/include/binder/Parcel.h
++++ b/libs/binder/include/binder/Parcel.h
+@@ -486,14 +486,18 @@
+     size_t              mObjectsSize;
+     size_t              mObjectsCapacity;
+     mutable size_t      mNextObjectHint;
+-    mutable bool        mObjectsSorted;
+ 
+-    mutable bool        mRequestHeaderPresent;
+-    mutable size_t      mWorkSourceRequestHeaderPosition;
+-
+-    mutable bool        mFdsKnown;
+-    mutable bool        mHasFds;
+-    bool                mAllowFds;
++    // ATU-L21: Android 8.0 vendor binaries allocate Parcel on the stack with the 8.0 size (64-bit 104 B, 32-bit 52 B);
++    // the Android 10 layout (120/60 B) overflows and overwrites adjacent memory (RIL, camera, display tools).
++    // Flags and the work-source header position are packed into one 32-bit word -> size and first field offsets
++    // match 8.0 (see static_assert in Parcel.cpp). The wire protocol is unchanged. (Binder transaction data
++    // is at most a few MB; a 26-bit position is enough.)
++    mutable uint32_t    mWorkSourceRequestHeaderPosition : 26;
++    mutable uint32_t    mObjectsSorted : 1;
++    mutable uint32_t    mRequestHeaderPresent : 1;
++    mutable uint32_t    mFdsKnown : 1;
++    mutable uint32_t    mHasFds : 1;
++    uint32_t            mAllowFds : 1;
+ 
+     release_func        mOwner;
+     void*               mOwnerCookie;
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -78,6 +78,10 @@
+ 
+ namespace android {
+ 
++// ATU-L21: stack-size compatibility with 8.0 vendor binaries (see Parcel.h).
++static_assert(sizeof(Parcel) == (sizeof(void*) == 8 ? 104 : 52),
++              "Parcel size must match the Android 8.0 vendor ABI");
++
+ static pthread_mutex_t gParcelGlobalAllocSizeLock = PTHREAD_MUTEX_INITIALIZER;
+ static size_t gParcelGlobalAllocSize = 0;
+ static size_t gParcelGlobalAllocCount = 0;
+diff --git a/services/gpuservice/gpuservice.rc b/services/gpuservice/gpuservice.rc
+--- a/services/gpuservice/gpuservice.rc
++++ b/services/gpuservice/gpuservice.rc
+@@ -1,4 +1,6 @@
+ service gpu /system/bin/gpuservice
+     class core
+-    user gpu_service
++    # ATU-L21: the ramdisk runs the Android 8.0 init, which does not know the "gpu_service" user name
++    # (decode_uid fails -> restart loop). AID_GPU_SERVICE as a number works with every init.
++    user 1072
+     group graphics

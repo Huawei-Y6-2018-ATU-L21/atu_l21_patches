@@ -1,0 +1,37 @@
+From 28626f35ed016b0bdcd4667d4175f53bfb6639cc Mon Sep 17 00:00:00 2001
+From: ayberkcn8181 <ayberk.cakman81@outlook.com>
+Date: Sun, 11 Oct 2026 12:42:03 +0300
+Subject: [PATCH] ATU-L21: optionally append build.prop to prop.default
+
+The Huawei-modified Android 8.0 init of ATU-L21 never loads /system/build.prop
+(verified: a test property there is not set, one in prop.default is).
+
+Change-Id: I6200eacd2f0967e4588c3fbaf683d5fc99d639c0
+---
+ core/Makefile | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/core/Makefile b/core/Makefile
+index 2a6cf2328..58e98583a 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -257,6 +257,16 @@ $(INSTALLED_DEFAULT_PROP_TARGET): $(BUILDINFO_COMMON_SH) $(intermediate_system_b
+ 	$(hide) $(foreach line,$(FINAL_DEFAULT_PROPERTIES), \
+ 	    echo "$(line)" >> $@;)
+ 	$(hide) build/make/tools/post_process_props.py $@
++ifeq ($(TARGET_DEFAULT_PROP_INCLUDES_BUILD_PROP),true)
++	@# ATU-L21: the Huawei-modified Android 8.0 init on this device reads /system/etc/prop.default but never
++	@# /system/build.prop. Append build.prop here, after the default properties (the normal load order).
++	$(hide) echo "#" >> $@; \
++	        echo "# /system/build.prop (TARGET_DEFAULT_PROP_INCLUDES_BUILD_PROP)" >> $@; \
++	        echo "#" >> $@;
++	$(hide) grep -v 'ro.product.first_api_level' $(intermediate_system_build_prop) >> $@
++	@# The Android 10 init derives ro.build.fingerprint from ro.system.build.fingerprint; the 8.0 init does not.
++	$(hide) sed -n 's/^ro.system.build.fingerprint=/ro.build.fingerprint=/p' $(intermediate_system_build_prop) >> $@
++endif
+ ifdef property_overrides_split_enabled
+ 	$(hide) mkdir -p $(TARGET_ROOT_OUT)
+ 	$(hide) ln -sf system/etc/prop.default $(INSTALLED_DEFAULT_PROP_OLD_TARGET)
+-- 
+2.56.0
+

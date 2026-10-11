@@ -1,0 +1,29 @@
+From c9e9d95344c4145f72ee6042e7a81adf48de40db Mon Sep 17 00:00:00 2001
+From: ayberkcn8181 <ayberk.cakman81@outlook.com>
+Date: Sun, 11 Oct 2026 13:29:29 +0300
+Subject: [PATCH] ATU-L21: optional hardware_overlay list
+ (TARGET_PHH_NO_HARDWARE_OVERLAYS)
+
+Change-Id: I64cf9f1b7174970220a5953863187bd35f9685a2
+---
+ base.mk | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/base.mk b/base.mk
+index e77e86d..8225ce6 100644
+--- a/base.mk
++++ b/base.mk
+@@ -12,7 +12,10 @@ DEVICE_PACKAGE_OVERLAYS += \
+ 	device/phh/treble/overlay \
+ 	device/phh/treble/overlay-lineage
+ 
++# ATU-L21: a device build can skip the full overlay list (and TrebleApp) and pick its own overlays.
++ifneq ($(TARGET_PHH_NO_HARDWARE_OVERLAYS),true)
+ $(call inherit-product, vendor/hardware_overlay/overlay.mk)
++endif
+ $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+ $(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base_telephony.mk)
+ 
+-- 
+2.56.0
+
